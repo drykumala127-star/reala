@@ -1,0 +1,516 @@
+
+'use server';
+import { ObjectId } from 'mongodb';
+import { getDb } from './mongodb';
+import { verifyAdminSession } from './actions/auth';
+import type { Series, Episode, CoinPack, MonetizationSettings, Purchase, Ad, GeneralSettings, Language, UITranslations, CustomPage, ContactMessage, Report, Category, PluginsSettings, RewardTask, RewardsSettings, UserRewardClaim, CoinTransaction, PaymentGatewaySettings, AdminProfile, Favorite, WatchHistory, StorageSettings } from './types';
+import { isDemoMode, obfuscateEmail } from './demo-mode';
+
+function maskSecretsForDemo(obj: any): any {
+    if (!isDemoMode()) return obj;
+    if (!obj || typeof obj !== 'object' || obj instanceof Date) return obj;
+    if (Array.isArray(obj)) return obj.map(maskSecretsForDemo);
+    
+    const result = { ...obj };
+    for (const key of Object.keys(result)) {
+        if (typeof result[key] === 'string' && result[key].length > 0) {
+            const k = key.toLowerCase();
+            if (k.includes('password') || k.includes('secret') || k.includes('token') || (k.includes('key') && !k.includes('keyword'))) {
+                result[key] = '************************';
+            }
+        } else if (typeof result[key] === 'object') {
+            result[key] = maskSecretsForDemo(result[key]);
+        }
+    }
+    return result;
+}
+
+
+const mapDoc = (doc: any) => {
+    if (!doc) return null;
+    const { _id, ...rest } = doc;
+    return { id: _id.toString(), ...rest };
+}
+
+const getQueryById = (id: string) => {
+    try {
+        return {
+            $or: [
+                { _id: ObjectId.isValid(id) ? new ObjectId(id) : null },
+                { _id: id as any }
+            ].filter(q => q._id !== null)
+        };
+    } catch (e) {
+        return { _id: id as any };
+    }
+};
+
+function logError(msg: string, error: any) {
+    if (process.env.NODE_ENV !== 'production') {
+        console.error(msg, error);
+    } else {
+        console.error(`${msg}: ${error?.message || 'Error occurred.'}`);
+    }
+}
+
+
+export async function isAppInstalled(): Promise<boolean> {
+    try {
+        const db = await getDb();
+        const admin = await db.collection('settings').findOne({ _id: 'admin' as any });
+        return !!admin;
+    } catch (e) {
+        return false;
+    }
+}
+
+export async function getDemoModeStatus(): Promise<boolean> {
+    return isDemoMode();
+}
+
+export async function getAdminProfile(): Promise<AdminProfile | null> {
+    if (!await verifyAdminSession()) return null;
+    try {
+        const db = await getDb();
+        const admin = await db.collection('settings').findOne({ _id: 'admin' as any });
+        if (admin) {
+            const doc = mapDoc(admin) as unknown as AdminProfile;
+            if (doc.email) doc.email = obfuscateEmail(doc.email);
+            return doc;
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getAllSeries(lang?: string): Promise<Series[]> {
+    try {
+        const db = await getDb();
+        const query = lang ? { targetLanguages: lang } : {};
+        const series = await db.collection('series').find(query).sort({ title: 1 }).toArray();
+        return series.map(s => mapDoc(s)) as Series[];
+    } catch (e) {
+        logError('Failed to fetch series', e);
+        return [];
+    }
+}
+
+export async function getEpisodesForSeries(seriesId: string): Promise<Episode[]> {
+    try {
+        const db = await getDb();
+        const episodes = await db.collection('episodes').find({ seriesId: seriesId }).sort({ episodeInSeason: 1 }).toArray();
+        const mapped = episodes.map(e => mapDoc(e)) as Episode[];
+        return mapped;
+    } catch (e) {
+        logError('Failed to fetch episodes', e);
+        return [];
+    }
+}
+
+export async function getSimilarSeries(series: Series): Promise<Series[]> {
+    try {
+        const db = await getDb();
+        const seriesCollection = db.collection('series');
+        const queryId = ObjectId.isValid(series.id) ? new ObjectId(series.id) : series.id as any;
+        
+        let similar: any[] = [];
+        if (series.genres && series.genres.length > 0) {
+            similar = await seriesCollection.find({
+                genres: { $in: series.genres },
+                _id: { $ne: queryId }
+            }).limit(6).toArray();
+        }
+
+        if (similar.length === 0) {
+            similar = await seriesCollection.find({ _id: { $ne: queryId } }).limit(6).toArray();
+        }
+
+        return similar.map(s => mapDoc(s)) as Series[];
+    } catch(e) {
+        return [];
+    }
+}
+
+export async function getCoinPacks(): Promise<CoinPack[]> {
+    try {
+        const db = await getDb();
+        const packs = await db.collection('coin-packs').find({}).toArray();
+        return packs.map(p => mapDoc(p)) as CoinPack[];
+    } catch (e) {
+        logError('Failed to fetch coin packs from MongoDB', e);
+        return [];
+    }
+}
+
+export async function getMonetizationSettings(): Promise<MonetizationSettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'monetization' as any });
+        return settings ? maskSecretsForDemo((mapDoc(settings) as unknown as MonetizationSettings)) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getPaymentSettingsAdmin(): Promise<PaymentGatewaySettings | null> {
+    if (!await verifyAdminSession()) return null;
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'payment' as any });
+        return settings ? maskSecretsForDemo((mapDoc(settings) as unknown as PaymentGatewaySettings)) : null;
+    } catch (e) { return null; }
+}
+
+export async function getPaymentSettings(): Promise<PaymentGatewaySettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'payment' as any });
+        if (!settings) return null;
+        const mapped = mapDoc(settings) as any;
+        delete mapped.stripeSecretKey;
+        delete mapped.stripeWebhookSecret;
+        delete mapped.paypalSecret;
+        delete mapped.razorpayKeySecret;
+        delete mapped.razorpayWebhookSecret;
+        delete mapped.flutterwaveSecretKey;
+        delete mapped.flutterwaveWebhookSecret;
+        delete mapped.phonepeSaltKey;
+        delete mapped.phonepeSaltIndex;
+        delete mapped.cashfreeSecretKey;
+        delete mapped.cashfreeWebhookSecret;
+        delete mapped.paymobApiKey;
+        delete mapped.paymobHmac;
+        delete mapped.payuMerchantSalt;
+        delete mapped.googlePlayServiceAccountPrivateKey;
+        return mapped;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getRewardSettings(): Promise<RewardsSettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'rewards' as any });
+        return settings ? maskSecretsForDemo((mapDoc(settings) as unknown as RewardsSettings)) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getRewardTasks(platform: 'website' | 'android' | 'ios' = 'website'): Promise<RewardTask[]> {
+    try {
+        const db = await getDb();
+        const query = platform === 'website'
+            ? { $or: [{ platform: 'website' }, { platform: { $exists: false } }] }
+            : { platform };
+        const tasks = await db.collection('reward-tasks').find(query).toArray();
+        return tasks.map(t => mapDoc(t)) as RewardTask[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getStorageSettingsAdmin(): Promise<StorageSettings | null> {
+    if (!await verifyAdminSession()) return null;
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'storage' as any });
+        return settings ? maskSecretsForDemo((mapDoc(settings) as unknown as StorageSettings)) : null;
+    } catch (e) { return null; }
+}
+
+export async function getStorageSettings(): Promise<StorageSettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'storage' as any });
+        if (!settings) return null;
+        const mapped = mapDoc(settings) as any;
+        delete mapped.awsSecretAccessKey;
+        delete mapped.bunnyPassword;
+        return mapped;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getUserClaims(userId: string): Promise<UserRewardClaim[]> {
+    try {
+        const db = await getDb();
+        const claims = await db.collection('reward-claims').find({ userId }).toArray();
+        return claims.map(c => mapDoc(c)) as UserRewardClaim[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getUserTransactions(userId: string, limitCount?: number): Promise<CoinTransaction[]> {
+    try {
+        const db = await getDb();
+        let cursor = db.collection('coin-transactions').find({ userId }).sort({ createdAt: -1 });
+        if (limitCount) cursor = cursor.limit(limitCount);
+        const txs = await cursor.toArray();
+        return txs.map(t => ({
+            ...mapDoc(t),
+            createdAt: t.createdAt instanceof Date ? t.createdAt : new Date(t.createdAt)
+        })) as CoinTransaction[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getUserFavorites(userId: string): Promise<Favorite[]> {
+    try {
+        const db = await getDb();
+        const favs = await db.collection('favorites').find({ userId }).toArray();
+        return favs.map(f => mapDoc(f)) as Favorite[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getUserHistory(userId: string): Promise<WatchHistory[]> {
+    try {
+        const db = await getDb();
+        const hist = await db.collection('history').find({ userId }).sort({ watchedAt: -1 }).toArray();
+        return hist.map(h => mapDoc(h)) as WatchHistory[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getPluginsSettingsAdmin(): Promise<PluginsSettings | null> {
+    if (!await verifyAdminSession()) return null;
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'plugins' as any });
+        return settings ? maskSecretsForDemo((mapDoc(settings) as unknown as PluginsSettings)) : null;
+    } catch (e) { return null; }
+}
+
+export async function getPluginsSettings(): Promise<PluginsSettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'plugins' as any });
+        if (!settings) return null;
+        const mapped = mapDoc(settings) as any;
+        delete mapped.smtpHost;
+        delete mapped.smtpUser;
+        delete mapped.smtpPassword;
+        delete mapped.openaiApiKey;
+        delete mapped.geminiApiKey;
+        delete mapped.groqApiKey;
+        delete mapped.oneSignalApiKey;
+        delete mapped.recaptchaSecretKey;
+        delete mapped.cloudflareSecretKey;
+        delete mapped.hcaptchaSecretKey;
+        delete mapped.indexnowApiKey;
+        return mapped;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getAllPurchases(): Promise<Purchase[]> {
+    if (!await verifyAdminSession()) return [];
+    try {
+        const db = await getDb();
+        const purchases = await db.collection('purchases').find({}).sort({ createdAt: -1 }).toArray();
+        return purchases.map(p => {
+            const doc = mapDoc(p) as Purchase;
+            if (doc.userEmail) doc.userEmail = obfuscateEmail(doc.userEmail);
+            return doc;
+        });
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getAllSeriesForAdmin(): Promise<Series[]> {
+    if (!await verifyAdminSession()) return [];
+    try {
+        const db = await getDb();
+        const series = await db.collection('series').find({}).sort({ createdAt: -1 }).toArray();
+        return series.map(s => mapDoc(s)) as Series[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getSeriesById(id: string): Promise<Series | null> {
+    try {
+        const db = await getDb();
+        const query = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { _id: id as any };
+        const series = await db.collection('series').findOne(query);
+        return mapDoc(series) as Series | null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getAdSettings(placementId: string = 'main_script_ad'): Promise<Ad | null> {
+    try {
+        const db = await getDb();
+        const ad = await db.collection('ads').findOne({ _id: placementId as any });
+        return ad ? (mapDoc(ad) as unknown as Ad) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getGeneralSettingsAdmin(): Promise<GeneralSettings | null> {
+    if (!await verifyAdminSession()) return null;
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'general' as any });
+        return settings ? maskSecretsForDemo((mapDoc(settings) as unknown as GeneralSettings)) : null;
+    } catch (e) { return null; }
+}
+
+export async function getGeneralSettings(): Promise<GeneralSettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'general' as any });
+        if (!settings) return null;
+        const mapped = mapDoc(settings) as unknown as GeneralSettings;
+        delete mapped.firebaseServiceAccount;
+        delete mapped.licenseKey;
+        delete mapped.smtpPassword;
+        delete mapped.smtpUser;
+        delete mapped.smtpHost;
+        delete mapped.smtpPort;
+        return mapped;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getAllLanguages(): Promise<Language[]> {
+    try {
+        const db = await getDb();
+        const languages = await db.collection('languages').find({}).sort({ name: 1 }).toArray();
+        return languages.map(l => mapDoc(l)) as Language[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getTranslations(langCode: string): Promise<UITranslations | null> {
+    try {
+        const db = await getDb();
+        const translations = await db.collection('translations').findOne({ _id: langCode as any });
+        return translations ? (mapDoc(translations) as unknown as UITranslations) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getCustomPages(): Promise<CustomPage[]> {
+    try {
+        const db = await getDb();
+        const pages = await db.collection('pages').find({}).toArray();
+        return pages.map(p => mapDoc(p)) as CustomPage[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getPageById(id: string): Promise<CustomPage | null> {
+    try {
+        const db = await getDb();
+        const page = await db.collection('pages').findOne(getQueryById(id));
+        return page ? mapDoc(page) as unknown as CustomPage : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getContactMessages(): Promise<ContactMessage[]> {
+    if (!await verifyAdminSession()) return [];
+    try {
+        const db = await getDb();
+        const messages = await db.collection('contacts').find({}).sort({ createdAt: -1 }).toArray();
+        return messages.map(m => {
+            const doc = mapDoc(m) as ContactMessage;
+            if (doc.email) doc.email = obfuscateEmail(doc.email);
+            return doc;
+        });
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getContactMessagesCount(): Promise<number> {
+    if (!await verifyAdminSession()) return 0;
+    try {
+        const db = await getDb();
+        return await db.collection('contacts').countDocuments({ isRead: false });
+    } catch (e) {
+        return 0;
+    }
+}
+
+export async function getReports(): Promise<Report[]> {
+    if (!await verifyAdminSession()) return [];
+    try {
+        const db = await getDb();
+        const reports = await db.collection('reports').find({}).sort({ createdAt: -1 }).toArray();
+        return reports.map(r => {
+            const doc = mapDoc(r) as Report;
+            if (doc.reporterEmail) doc.reporterEmail = obfuscateEmail(doc.reporterEmail);
+            return doc;
+        });
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getCategories(): Promise<Category[]> {
+    try {
+        const db = await getDb();
+        const categories = await db.collection('categories').find({}).toArray();
+        return categories.map(c => mapDoc(c)) as Category[];
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getCategoryBySlug(slug: string): Promise<Category | null> {
+    try {
+        const db = await getDb();
+        const category = await db.collection('categories').findOne({ slug });
+        return category ? mapDoc(category) as unknown as Category : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function getAllUsersForAdmin(): Promise<any[]> {
+    if (!await verifyAdminSession()) return [];
+    try {
+        const db = await getDb();
+        const users = await db.collection('users').find({}).sort({ createdAt: -1 }).toArray();
+        return users.map(u => {
+            const doc = mapDoc(u);
+            if (doc.email) doc.email = obfuscateEmail(doc.email);
+            return doc;
+        });
+    } catch (e) {
+        return [];
+    }
+}
+
+export async function getMobileSettings(): Promise<import('./types').MobileSettings | null> {
+    try {
+        const db = await getDb();
+        const settings = await db.collection('settings').findOne({ _id: 'mobile' as any });
+        return settings ? mapDoc(settings) as unknown as import('./types').MobileSettings : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+export async function verifyLicensePeriodically(domain: string): Promise<boolean> { return true; }
+
+
